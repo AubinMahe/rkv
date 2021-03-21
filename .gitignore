@@ -53,3 +53,5 @@ dkms.conf
 /Debug/
 /.settings/
 /Unitaires/
+/BUILD/
+/tests-d
