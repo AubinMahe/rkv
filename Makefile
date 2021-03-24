@@ -20,6 +20,19 @@ OBJS_DBG_TST = $(SRCS_TST:%c=BUILD/DEBUG/%o)
 DEPS         = $(SRCS:%c=BUILD/%d)
 DEPS_TST     = $(SRCS_TST:%c=BUILD/%d)
 
+VALGRIND_COMMON_OPTIONS =\
+# --track-fds=yes
+ --error-exitcode=2
+
+VALGRIND_MEMCHECK_OPTIONS = $(VALGRIND_COMMON_OPTIONS)\
+ --leak-check=full\
+ --show-leak-kinds=all\
+ --track-origins=yes\
+ --expensive-definedness-checks=yes
+
+VALGRIND_HELGRIND_OPTIONS = $(VALGRIND_COMMON_OPTIONS)\
+ --free-is-write=yes
+
 .PHONY: all
 all: lib$(LIB_NAME)-d.so lib$(LIB_NAME).so tests-d
 
@@ -29,9 +42,13 @@ validate: tests-d
 	@rm cplusplus_ckeck.o
 	@LD_LIBRARY_PATH=.:./utils ./tests-d
 
-.PHONY: validate-valgrind
-validate-valgrind: tests-d
-	LD_LIBRARY_PATH=.:./utils valgrind --leak-check=full --show-leak-kinds=all ./tests-d
+.PHONY: memcheck
+memcheck: tests-d
+	LD_LIBRARY_PATH=.:./utils valgrind --tool=memcheck $(VALGRIND_MEMCHECK_OPTIONS) ./tests-d
+
+.PHONY: helgrind
+helgrind: tests-d
+	LD_LIBRARY_PATH=.:./utils valgrind --tool=helgrind $(VALGRIND_HELGRIND_OPTIONS) ./tests-d
 
 .PHONY: clean
 clean:
