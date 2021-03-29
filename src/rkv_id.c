@@ -45,9 +45,9 @@ bool rkv_id_decode( rkv_id * id, net_buff buffer ) {
       fprintf( stderr, "%s: NULL argument\n", __func__ );
       return false;
    }
-   int32_t  host;
-   int32_t  process;
-   uint32_t instance;
+   int32_t  host     = 0;
+   int32_t  process  = 0;
+   uint32_t instance = 0;
    if(   net_buff_decode_int32 ( buffer, &host     )
       && net_buff_decode_int32 ( buffer, &process  )
       && net_buff_decode_uint32( buffer, &instance ))

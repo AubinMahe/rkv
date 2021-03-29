@@ -1,5 +1,4 @@
 #include <rkv.h>
-#include <rkv_id.h>
 
 #include <net/net_buff.h>
 #include <utils/utils_map.h>
@@ -39,6 +38,12 @@ typedef struct {
    const void * payload;
 } rkv_data_holder;
 
+typedef struct rkv_listener_s {
+   rkv_change_callback callback;
+   void *              user_context;
+   struct rkv_listener_s * next;
+} * rkv_listener;
+
 /**
  * Cette classe contient plusieurs caches :
  * - Le cache courant de l'application, en lecture seule.
@@ -66,6 +71,7 @@ typedef struct {
    utils_map          transactions;
    pthread_mutex_t    received_data_lock;
    utils_map          received_data;
+   rkv_listener       listeners;
 } rkv_private;
 
 static bool get_multicast_interface_address( char * address ) {
@@ -159,7 +165,13 @@ static void * multicast_receive_thread( void * arg ) {
                utils_map_new( &received_data, rkv_id_compare, true, true );
             }
             rkv_id id = NULL;
-            while( rkv_id_decode( &id, This->recv_buff )) {
+            size_t limit = 0;
+            position = 0;
+            while( net_buff_get_position( This->recv_buff, &position )
+               &&  net_buff_get_limit   ( This->recv_buff, &limit    )
+               &&( position < limit )
+               &&  rkv_id_decode( &id, This->recv_buff ))
+            {
                unsigned type;
                if( ! net_buff_decode_uint32( This->recv_buff, &type )) {
                   char ids[ID_AS_STRING_LENGTH_MAX+1];
@@ -209,6 +221,9 @@ static void * multicast_receive_thread( void * arg ) {
             pthread_mutex_lock( &This->received_data_lock );
             This->received_data = received_data;
             pthread_mutex_unlock( &This->received_data_lock );
+            for( rkv_listener listener = This->listeners; listener; listener = listener->next ) {
+               listener->callback((rkv)This, listener->user_context );
+            }
          }
       }
    }
@@ -366,6 +381,24 @@ bool rkv_new( rkv * cache, const char * group, unsigned short port, const rkv_co
       return false;
    }
    *cache = (rkv)This;
+   return true;
+}
+
+bool rkv_add_listener( rkv cache, rkv_change_callback callback, void * user_context ) {
+   if(( cache == NULL )||( callback == NULL )) {
+      fprintf( stderr, "%s: null argument\n", __func__ );
+      return false;
+   }
+   rkv_listener listener = malloc( sizeof( struct rkv_listener_s ));
+   if( listener == NULL ) {
+      perror( "malloc" );
+      return false;
+   }
+   listener->callback     = callback;
+   listener->user_context = user_context;
+   rkv_private * This = (rkv_private *)cache;
+   listener->next = This->listeners;
+   This->listeners = listener;
    return true;
 }
 
@@ -566,6 +599,12 @@ bool rkv_delete( rkv * cache ) {
       utils_map_delete( &This->received_data );
    }
    utils_map_delete( &This->codecs );
+   rkv_listener listener = This->listeners;
+   while( listener ) {
+      rkv_listener next = listener->next;
+      free( listener );
+      listener = next;
+   }
    free( This );
    *cache = NULL;
    return true;

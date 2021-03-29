@@ -2,6 +2,7 @@
 #include <rkv.h>
 #include <utils/utils_time.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +107,60 @@ static void person_releaser( void * data, utils_map codecs ) {
    (void)codecs;
 }
 
+static int person_compare( const person * left, const person * right ) {
+   if(( left == NULL )&&( right == NULL )) {
+      return 0;
+   }
+   if( left &&( right == NULL )) {
+      return +1;
+   }
+   if(( left == NULL )&& right ) {
+      return -1;
+   }
+   int diff = strcmp( left->name, right->name );
+   if( diff == 0 ) {
+      diff = strcmp( left->forname, right->forname );
+      if( diff == 0 ) {
+         diff = left->birthday.year - right->birthday.year;
+         if( diff == 0 ) {
+            diff = left->birthday.month - right->birthday.month;
+            if( diff == 0 ) {
+               diff = left->birthday.day - right->birthday.day;
+            }
+         }
+      }
+   }
+   return diff;
+}
+
+static rkv_id eve_id    = NULL;
+static rkv_id muriel_id = NULL;
+static rkv_id aubin_id  = NULL;
+
+static const person eve    = { "Eve"   , "Mahé", { 28, 2, 2008 }};
+static const person muriel = { "Muriel", "Mahé", { 26, 1, 1973 }};
+static const person aubin  = { "Aubin" , "Mahé", { 24, 1, 1966 }};
+
+static pthread_cond_t  on_receive_ended       = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t on_receive_ended_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool            receive_ended          = false;
+
+static void on_receive( rkv This, void * user_context ) {
+   struct tests_report * report = (struct tests_report *)user_context;
+   ASSERT( report, rkv_refresh( This ));
+   const void * data = NULL;
+   ASSERT( report, rkv_get(  This, eve_id   , &data ));
+   ASSERT( report, person_compare( (const person *)data, &eve    ) == 0  );
+   ASSERT( report, rkv_get(  This, muriel_id, &data ));
+   ASSERT( report, person_compare( (const person *)data, &muriel ) == 0  );
+   ASSERT( report, rkv_get(  This, aubin_id , &data ));
+   ASSERT( report, person_compare( (const person *)data, &aubin  ) == 0  );
+   pthread_mutex_lock( &on_receive_ended_mutex );
+   receive_ended = true;
+   pthread_cond_signal( &on_receive_ended );
+   pthread_mutex_unlock( &on_receive_ended_mutex );
+}
+
 void rkv_test( struct tests_report * report ) {
    tests_chapter( report, "rkv" );
    const char * trnsctn_name = "Ma transaction";
@@ -122,12 +177,6 @@ void rkv_test( struct tests_report * report ) {
       person_decode,
       person_releaser
    };
-   rkv_id eve_id    = NULL;
-   rkv_id muriel_id = NULL;
-   rkv_id aubin_id  = NULL;
-   const person eve    = { "Eve"   , "Mahé", { 28, 2, 2008 }};
-   const person muriel = { "Muriel", "Mahé", { 26, 1, 1973 }};
-   const person aubin  = { "Aubin" , "Mahé", { 24, 1, 1966 }};
    rkv_id_new( &eve_id );
    rkv_id_new( &muriel_id );
    rkv_id_new( &aubin_id );
@@ -136,20 +185,17 @@ void rkv_test( struct tests_report * report ) {
       &date_codec
    };
    ASSERT( report, rkv_new( &This, "239.0.0.66", 2416, codecs, sizeof(codecs)/sizeof(codecs[0] )));
+   ASSERT( report, rkv_add_listener( This, on_receive, report ));
    ASSERT( report, rkv_put( This, trnsctn_name, eve_id   , PERSON_TYPE_ID, &eve ));
    ASSERT( report, rkv_put( This, trnsctn_name, muriel_id, PERSON_TYPE_ID, &muriel ));
    ASSERT( report, rkv_put( This, trnsctn_name, aubin_id , PERSON_TYPE_ID, &aubin ));
+   receive_ended = false;
    ASSERT( report, rkv_publish( This, trnsctn_name ));
-   utils_sleep( 10 );
-   ASSERT( report, rkv_refresh( This ));
-   const void * data = NULL;
-   ASSERT( report, rkv_get(  This, aubin_id, &data ));
-   const person * prsn = (const person *)data;
-   ASSERT( report, ( prsn != NULL )&&( 0 == strcmp( prsn->forname, "Aubin" )));
-   ASSERT( report, ( prsn != NULL )&&( 0 == strcmp( prsn->name   , "Mahé"  )));
-   ASSERT( report, ( prsn != NULL )&&( prsn->birthday.day   ==   24 ));
-   ASSERT( report, ( prsn != NULL )&&( prsn->birthday.month ==    1 ));
-   ASSERT( report, ( prsn != NULL )&&( prsn->birthday.year  == 1966 ));
+   pthread_mutex_lock( &on_receive_ended_mutex );
+   while( ! receive_ended ) {
+      pthread_cond_wait( &on_receive_ended, &on_receive_ended_mutex );
+   }
+   pthread_mutex_unlock( &on_receive_ended_mutex );
    ASSERT( report, rkv_delete( &This ));
    ASSERT( report, rkv_id_delete( &eve_id ));
    ASSERT( report, rkv_id_delete( &muriel_id ));

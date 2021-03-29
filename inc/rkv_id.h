@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 typedef struct { unsigned unused; } * rkv_id;
 
 // 0000000001/0000021314@007f0101
