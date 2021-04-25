@@ -1,6 +1,6 @@
 #pragma once
 
-#include <stdbool.h>
+#include <net/net_buff.h>
 
 typedef struct { unsigned unused; } * rkv_id;
 

@@ -70,6 +70,7 @@ typedef struct {
    utils_map          read_only_data;
    utils_map          transactions;
    pthread_mutex_t    received_data_lock;
+   pthread_mutex_t    listeners_lock;
    utils_map          received_data;
    rkv_listener       listeners;
 } rkv_private;
@@ -97,10 +98,10 @@ typedef struct {
    size_t dest_size;
 } string;
 
-static bool dump_one_id( size_t index, const void * key, const void * value, void * user_context ) {
+static bool dump_one_id( size_t index, map_pair pair, void * user_context ) {
    string * str = user_context;
    char ids[ID_AS_STRING_LENGTH_MAX+1];
-   void * id = CONST_CAST( key, void );
+   void * id = CONST_CAST( pair.key, void );
    rkv_id_to_string( id, ids, sizeof( ids ));
    size_t len = strlen( str->dest );
    if( len &&( len+2 < str->dest_size )) {
@@ -112,7 +113,6 @@ static bool dump_one_id( size_t index, const void * key, const void * value, voi
    }
    return true;
    (void)index;
-   (void)value;
 }
 
 static void dump_all_ids( utils_map map, const char * title ) {
@@ -180,7 +180,7 @@ static void * multicast_receive_thread( void * arg ) {
                   break;
                }
                rkv_codec * codec = NULL;
-               if(( ! utils_map_get( This->codecs, &type, (void **)&codec ))||( codec == NULL )) {
+               if(( ! utils_map_get( This->codecs, &type, (map_value *)&codec ))||( codec == NULL )) {
                   char ids[ID_AS_STRING_LENGTH_MAX+1];
                   rkv_id_to_string( id, ids, sizeof( ids ));
                   fprintf( stderr, "%s: no codec found for %s, packet skipped\n", __func__, ids );
@@ -221,9 +221,11 @@ static void * multicast_receive_thread( void * arg ) {
             pthread_mutex_lock( &This->received_data_lock );
             This->received_data = received_data;
             pthread_mutex_unlock( &This->received_data_lock );
+            pthread_mutex_lock( &This->listeners_lock );
             for( rkv_listener listener = This->listeners; listener; listener = listener->next ) {
                listener->callback((rkv)This, listener->user_context );
             }
+            pthread_mutex_unlock( &This->listeners_lock );
          }
       }
    }
@@ -369,6 +371,7 @@ bool rkv_new( rkv * cache, const char * group, unsigned short port, const rkv_co
       return false;
    }
    pthread_mutex_init( &This->received_data_lock, NULL );
+   pthread_mutex_init( &This->listeners_lock, NULL );
    if( pthread_create( &This->thread, NULL, multicast_receive_thread, This )) {
       perror( "pthread_create" );
       close( This->sckt );
@@ -397,8 +400,10 @@ bool rkv_add_listener( rkv cache, rkv_change_callback callback, void * user_cont
    listener->callback     = callback;
    listener->user_context = user_context;
    rkv_private * This = (rkv_private *)cache;
+   pthread_mutex_lock( &This->listeners_lock );
    listener->next = This->listeners;
    This->listeners = listener;
+   pthread_mutex_unlock( &This->listeners_lock );
    return true;
 }
 
@@ -409,7 +414,7 @@ bool rkv_put( rkv cache, const char * name, const rkv_id id, unsigned type, cons
    }
    rkv_private * This  = (rkv_private *)cache;
    utils_map transaction = NULL;
-   if( ! utils_map_get( This->transactions, name, (void **)&transaction )) {
+   if( ! utils_map_get( This->transactions, name, (map_value *)&transaction )) {
       if( ! utils_map_new( &transaction, rkv_id_compare, false, true )) {
          return false;
       }
@@ -428,14 +433,14 @@ bool rkv_put( rkv cache, const char * name, const rkv_id id, unsigned type, cons
    return true;
 }
 
-static bool rkv_data_encode( size_t index, const void * key, const void * value, void * user_context ) {
+static bool rkv_data_encode( size_t index, map_pair pair, void * user_context ) {
    rkv_private *    This  = (rkv_private *)user_context;
-   const rkv_data_holder * data  = value;
+   const rkv_data_holder * data  = pair.value;
    rkv_codec *      codec = NULL;
    if(   rkv_id_encode( data->id, This->send_buff )
       && net_buff_encode_uint32( This->send_buff, data->type ))
    {
-      if( ! utils_map_get( This->codecs, &data->type, (void **)&codec )) {
+      if( ! utils_map_get( This->codecs, &data->type, (map_value *)&codec )) {
          char ids[ID_AS_STRING_LENGTH_MAX+1];
          rkv_id_to_string( data->id, ids, sizeof( ids ));
          fprintf( stderr, "%s: unable to encode data %s of type %d (no codec found)\n", __func__, ids, data->type );
@@ -453,7 +458,6 @@ static bool rkv_data_encode( size_t index, const void * key, const void * value,
    }
    return true;
    (void)index;
-   (void)key;
 }
 
 static bool clear_transaction( rkv_private * This, const char * name, utils_map transaction ) {
@@ -477,7 +481,7 @@ bool rkv_publish( rkv cache, const char * name ) {
    }
    rkv_private * This = (rkv_private *)cache;
    utils_map transaction = NULL;
-   return utils_map_get( This->transactions, name, (void **)&transaction )
+   return utils_map_get( This->transactions, name, (map_value *)&transaction )
       &&  net_buff_clear( This->send_buff )
       &&  utils_map_foreach( transaction, rkv_data_encode, This )
       &&  net_buff_flip( This->send_buff )
@@ -500,14 +504,14 @@ static void log_refreshed( utils_map received_data ) {
    }
 }
 
-static bool print_data_address( size_t index, const void * key, const void * value, void * user_context ) {
-   fprintf( stderr, "rkv_refresh {key = %p, value = %p} moved from received cache to read_only_cache\n", key, value );
+static bool print_data_address( size_t index, map_pair pair, void * user_context ) {
+   fprintf( stderr, "rkv_refresh {key = %p, value = %p} moved from received cache to read_only_cache\n", pair.key, pair.value );
    return true;
    (void)index;
    (void)user_context;
 }
 
-bool rkv_refresh( rkv cache ) {
+DLL_PUBLIC bool rkv_refresh( rkv cache ) {
    if( cache == NULL ) {
       fprintf( stderr, "%s: null argument\n", __func__ );
       return false;
@@ -532,27 +536,27 @@ bool rkv_refresh( rkv cache ) {
    return true;
 }
 
-bool rkv_get( rkv cache, const rkv_id id, const void ** dest ) {
+DLL_PUBLIC bool rkv_get( rkv cache, const rkv_id id, map_value * dest ) {
    if(( cache == NULL )||( dest == NULL )) {
       fprintf( stderr, "%s: null argument\n", __func__ );
       return false;
    }
    rkv_private * This  = (rkv_private *)cache;
-   void * entry = NULL;
+   map_value     entry = NULL;
    if( ! utils_map_get( This->read_only_data, id, &entry )) {
-      free( entry );
+      free( CONST_CAST( entry, void ));
       return false;
    }
-   rkv_data_holder * data = (rkv_data_holder *)entry;
+   rkv_data_holder * data = CONST_CAST( entry, rkv_data_holder );
    *dest = data->payload;
    return true;
 }
 
-static bool remove_payloads( size_t index, const void * key, const void * value, void * user_context ) {
-   const rkv_data_holder * holder = value;
+static bool remove_payloads( size_t index, map_pair pair, void * user_context ) {
+   const rkv_data_holder * holder = pair.value;
    utils_map               codecs = (utils_map)user_context;
    rkv_codec *             codec  = NULL;
-   if(   utils_map_get( codecs, &holder->type, (void **)&codec )
+   if(   utils_map_get( codecs, &holder->type, (map_value *)&codec )
       && codec
       && codec->releaser )
    {
@@ -560,19 +564,47 @@ static bool remove_payloads( size_t index, const void * key, const void * value,
    }
    return true;
    (void)index;
-   (void)key;
 }
 
-static bool delete_transaction( size_t index, const void * key, const void * value, void * user_context ) {
-   void * map = CONST_CAST( value, utils_map );
+static bool delete_transaction( size_t index, map_pair pair, void * user_context ) {
+   void * map = CONST_CAST( pair.value, utils_map );
    utils_map_delete((utils_map *)&map );
    return true;
    (void)index;
-   (void)key;
    (void)user_context;
 }
 
-bool rkv_delete( rkv * cache ) {
+typedef struct {
+   rkv_iterator iterator;
+   void *       user_context;
+} rkv_user_context;
+
+static bool rkv_for_one( size_t index, map_pair pair, void * user_context ) {
+   const rkv_data_holder * holder = pair.value;
+   rkv_user_context * rkvuc = (rkv_user_context *)user_context;
+   return rkvuc->iterator( index, holder->id, holder->type, holder->payload, rkvuc->user_context );
+}
+
+DLL_PUBLIC bool rkv_get_ids( rkv cache, rkv_id target[], size_t * target_size ) {
+   if(( cache == NULL )||( target_size == NULL )) {
+      fprintf( stderr, "%s: null argument\n", __func__ );
+      return false;
+   }
+   rkv_private * This = (rkv_private *)cache;
+   return utils_map_get_keys( This->read_only_data, (map_key *)target, target_size );
+}
+
+DLL_PUBLIC bool rkv_foreach( rkv cache, rkv_iterator iterator, void * user_context ) {
+   if(( cache == NULL )||( iterator == NULL )) {
+      fprintf( stderr, "%s: null argument\n", __func__ );
+      return false;
+   }
+   rkv_private *    This  = (rkv_private *)cache;
+   rkv_user_context rkvuc = { .iterator = iterator, .user_context = user_context };
+   return utils_map_foreach( This->read_only_data, rkv_for_one, &rkvuc );
+}
+
+DLL_PUBLIC bool rkv_delete( rkv * cache ) {
    if(( cache == NULL )||( *cache == NULL )) {
       fprintf( stderr, "%s: null argument\n", __func__ );
       return false;
@@ -581,6 +613,7 @@ bool rkv_delete( rkv * cache ) {
    pthread_mutex_lock( &This->received_data_lock );
    This->is_alive = false;
    pthread_mutex_unlock( &This->received_data_lock );
+   pthread_mutex_lock( &This->listeners_lock );
    if( setsockopt( This->sckt, IPPROTO_IP, IP_DROP_MEMBERSHIP, &This->imr, sizeof( This->imr )) < 0 ) {
       perror( "setsockopt( IP_DROP_MEMBERSHIP )" );
       return false;
@@ -605,6 +638,9 @@ bool rkv_delete( rkv * cache ) {
       free( listener );
       listener = next;
    }
+   pthread_mutex_unlock( &This->listeners_lock );
+   pthread_mutex_destroy( &This->received_data_lock );
+   pthread_mutex_destroy( &This->listeners_lock );
    free( This );
    *cache = NULL;
    return true;

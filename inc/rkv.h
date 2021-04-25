@@ -27,15 +27,19 @@ typedef struct {
 extern const rkv_codec rkv_codec_Zero;
 
 typedef struct { unsigned unused; } * rkv;
+typedef const void * rkv_value;
 
-typedef void (* rkv_change_callback)( rkv cache, void * user_context );
+typedef void (* rkv_change_callback )( rkv cache, void * user_context );
+typedef bool (* rkv_iterator )( size_t index, const rkv_id id, unsigned type, rkv_value data, void * user_context );
 
 DLL_PUBLIC bool rkv_new         ( rkv * cache, const char * group, unsigned short port, const rkv_codec * const codecs[], size_t count );
 DLL_PUBLIC bool rkv_add_listener( rkv   cache, rkv_change_callback callback, void * user_context );
-DLL_PUBLIC bool rkv_put         ( rkv   cache, const char * transaction, const rkv_id id, unsigned type, const void * data );
+DLL_PUBLIC bool rkv_put         ( rkv   cache, const char * transaction, const rkv_id id, unsigned type, rkv_value data );
 DLL_PUBLIC bool rkv_publish     ( rkv   cache, const char * transaction );
 DLL_PUBLIC bool rkv_refresh     ( rkv   cache );
-DLL_PUBLIC bool rkv_get         ( rkv   cache, const rkv_id id, const void ** data );
+DLL_PUBLIC bool rkv_get         ( rkv   cache, const rkv_id id, rkv_value * data );
+DLL_PUBLIC bool rkv_get_ids     ( rkv   cache, rkv_id target[], size_t * target_size );
+DLL_PUBLIC bool rkv_foreach     ( rkv   cache, rkv_iterator iterator, void * user_context );
 DLL_PUBLIC bool rkv_delete      ( rkv * cache );
 
 #ifdef __cplusplus
